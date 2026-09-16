@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#fffdfa" />
+  <title>DONUT MATCH | 文化祭ドーナツ販売オペレーション</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <p class="eyebrow">CULTURE FESTIVAL SALES OPS</p>
+        <div class="brand-row">
+          <h1>DONUT MATCH</h1>
+          <span class="live-badge">LIVE</span>
+        </div>
+        <p class="subtitle">客と商品を迷わず一致させる、ドーナツ販売オペレーション</p>
+      </div>
+
+      <div class="topbar-actions">
+        <label class="device-location">
+          <span>この端末の場所</span>
+          <select id="deviceLocationSelect" aria-label="この端末の場所">
+            <option value="sales">体育館横・販売所</option>
+            <option value="kitchen">家庭科調理室</option>
+            <option value="transport">運搬・連絡</option>
+          </select>
+        </label>
+        <div class="stat-pill"><span>本日販売</span><strong id="soldCount">0</strong></div>
+        <div class="stat-pill"><span>待ち</span><strong id="waitingCount">0</strong></div>
+        <button class="ghost-btn desktop-reset" id="resetBtn">営業リセット</button>
+      </div>
+    </header>
+
+    <nav class="desktop-nav" aria-label="メインナビゲーション">
+      <button class="nav-tab active" data-view-target="sales" aria-current="page">
+        <span class="nav-icon" aria-hidden="true">⌂</span>
+        <span>販売</span>
+      </button>
+      <button class="nav-tab" data-view-target="status">
+        <span class="nav-icon" aria-hidden="true">◫</span>
+        <span>拠点状況</span>
+        <span class="nav-dot" id="statusNavDot" hidden></span>
+      </button>
+      <button class="nav-tab" data-view-target="help">
+        <span class="nav-icon" aria-hidden="true">!</span>
+        <span>ヘルプ</span>
+        <span class="nav-count" id="helpNavCount" hidden>0</span>
+      </button>
+    </nav>
+
+    <main class="view-stack">
+      <!-- 1. 主機能：客と商品を一致させる販売オペレーション -->
+      <section class="app-view active" id="view-sales" data-view="sales">
+        <div class="mobile-view-head">
+          <div>
+            <p class="section-kicker">MAIN OPERATION</p>
+            <h2>販売・受け渡し</h2>
+          </div>
+          <div class="mini-wait"><span>待ち</span><strong id="mobileWaitingCount">0</strong></div>
+        </div>
+
+        <div class="dashboard">
+          <section class="panel order-panel">
+            <div class="panel-head">
+              <div>
+                <p class="section-kicker">STEP 1</p>
+                <h2>注文受付</h2>
+              </div>
+              <div class="order-number-box">
+                <span>次の番号</span>
+                <strong id="nextNumber">001</strong>
+              </div>
+            </div>
+
+            <div class="product-grid" id="productGrid"></div>
+
+            <div class="cart-card">
+              <div class="cart-head">
+                <div>
+                  <p class="section-kicker">CURRENT ORDER</p>
+                  <h3>注文内容</h3>
+                </div>
+                <button class="text-btn" id="clearCartBtn">クリア</button>
+              </div>
+              <div id="cartEmpty" class="empty-state">商品をタップしてください</div>
+              <div id="cartItems" class="cart-items"></div>
+              <div class="cart-footer">
+                <div>
+                  <span>合計</span>
+                  <strong id="cartTotal">¥0</strong>
+                </div>
+                <button class="primary-btn" id="submitOrderBtn" disabled>注文確定</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel queue-panel">
+            <div class="panel-head queue-head">
+              <div>
+                <p class="section-kicker">STEP 2</p>
+                <h2>番号で商品を一致</h2>
+              </div>
+              <div class="queue-filter">
+                <button class="filter-btn active" data-filter="all">すべて</button>
+                <button class="filter-btn" data-filter="preparing">準備中</button>
+                <button class="filter-btn" data-filter="ready">受取可</button>
+              </div>
+            </div>
+            <div class="match-hint">
+              <strong>注文番号を確認 → 商品内容を照合 → 受け渡し</strong>
+              <span>客が持っている番号と、この画面の番号を必ず一致させます。</span>
+            </div>
+            <div id="queueList" class="queue-list"></div>
+          </section>
+
+          <aside class="panel inventory-panel">
+            <div class="panel-head compact">
+              <div>
+                <p class="section-kicker">STOCK</p>
+                <h2>在庫</h2>
+              </div>
+              <button class="ghost-btn small" id="inventoryEditBtn">編集</button>
+            </div>
+            <div id="inventoryList" class="inventory-list"></div>
+
+            <div class="legend-card">
+              <p class="section-kicker">OPERATION</p>
+              <h3>基本フロー</h3>
+              <ol>
+                <li>注文をタップ入力</li>
+                <li>注文番号を客へ伝える</li>
+                <li>商品を番号と一致させる</li>
+                <li>商品準備後「受取可」</li>
+                <li>番号を再確認して受け渡し</li>
+              </ol>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- 2. 三拠点の状況 -->
+      <section class="app-view" id="view-status" data-view="status" hidden>
+        <div class="page-heading">
+          <div>
+            <p class="section-kicker">AREA STATUS</p>
+            <h2>3拠点の状況</h2>
+            <p>各拠点の忙しさを5段階で共有します。この端末の拠点だけワンタップで更新できます。</p>
+          </div>
+          <div class="current-location-chip" id="currentLocationChip">体育館横・販売所</div>
+        </div>
+
+        <div class="status-grid" id="statusGrid"></div>
+
+        <section class="panel status-guide">
+          <div>
+            <p class="section-kicker">BUSY LEVEL</p>
+            <h3>忙しさレベルの目安</h3>
+          </div>
+          <div class="level-guide">
+            <span><b>1</b> 余裕あり</span>
+            <span><b>2</b> 通常</span>
+            <span><b>3</b> やや忙しい</span>
+            <span><b>4</b> 応援ほしい</span>
+            <span><b>5</b> 緊急レベル</span>
+          </div>
+        </section>
+      </section>
+
+      <!-- 3. 人を呼ぶ・トラブル対応 -->
+      <section class="app-view" id="view-help" data-view="help" hidden>
+        <div class="page-heading">
+          <div>
+            <p class="section-kicker">HELP REQUEST</p>
+            <h2>人を呼ぶ</h2>
+            <p>混雑・欠員・商品不足・機材トラブルなどが起きた時に、他拠点へ応援を要請します。</p>
+          </div>
+          <div class="current-location-chip danger-soft" id="helpLocationChip">体育館横・販売所から送信</div>
+        </div>
+
+        <div class="help-layout">
+          <section class="panel help-compose">
+            <div class="panel-head">
+              <div>
+                <p class="section-kicker">NEW REQUEST</p>
+                <h2>応援要請</h2>
+              </div>
+              <span class="help-origin" id="helpOriginLabel">体育館横・販売所</span>
+            </div>
+
+            <div class="help-field">
+              <span class="field-label">必要人数</span>
+              <div class="choice-row" id="peopleChoice">
+                <button class="choice-btn active" data-people="1">1人</button>
+                <button class="choice-btn" data-people="2">2人</button>
+                <button class="choice-btn" data-people="3">3人以上</button>
+              </div>
+            </div>
+
+            <div class="help-field">
+              <span class="field-label">理由</span>
+              <div class="reason-grid" id="reasonChoice">
+                <button class="reason-btn active" data-reason="混雑対応">混雑対応</button>
+                <button class="reason-btn" data-reason="欠員">欠員</button>
+                <button class="reason-btn" data-reason="商品不足">商品不足</button>
+                <button class="reason-btn" data-reason="機材・システム">機材・システム</button>
+                <button class="reason-btn" data-reason="運搬">運搬</button>
+                <button class="reason-btn" data-reason="その他">その他</button>
+              </div>
+            </div>
+
+            <label class="help-field">
+              <span class="field-label">ひとこと <small>任意</small></span>
+              <textarea id="helpMemo" rows="3" maxlength="100" placeholder="例：注文列が急に伸びています"></textarea>
+            </label>
+
+            <label class="urgent-toggle">
+              <input type="checkbox" id="urgentHelp" />
+              <span>
+                <strong>緊急</strong>
+                <small>すぐに応援が必要な場合</small>
+              </span>
+            </label>
+
+            <button class="help-submit" id="sendHelpBtn">人を呼ぶ</button>
+          </section>
+
+          <section class="panel request-panel">
+            <div class="panel-head">
+              <div>
+                <p class="section-kicker">ACTIVE</p>
+                <h2>現在の応援要請</h2>
+              </div>
+              <span class="request-total" id="activeHelpCount">0件</span>
+            </div>
+            <div class="help-request-list" id="helpRequestList"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <nav class="mobile-bottom-nav" aria-label="メインナビゲーション">
+    <button class="mobile-nav-item active" data-view-target="sales" aria-current="page">
+      <span class="bottom-icon" aria-hidden="true">⌂</span>
+      <span>販売</span>
+    </button>
+    <button class="mobile-nav-item" data-view-target="status">
+      <span class="bottom-icon" aria-hidden="true">◫</span>
+      <span>状況</span>
+      <span class="nav-dot" id="mobileStatusNavDot" hidden></span>
+    </button>
+    <button class="mobile-nav-item" data-view-target="help">
+      <span class="bottom-icon alert-icon" aria-hidden="true">!</span>
+      <span>ヘルプ</span>
+      <span class="nav-count" id="mobileHelpNavCount" hidden>0</span>
+    </button>
+  </nav>
+
+  <dialog id="inventoryDialog" class="dialog">
+    <form method="dialog" class="dialog-card" id="inventoryForm">
+      <div class="dialog-head">
+        <div>
+          <p class="section-kicker">EDIT STOCK</p>
+          <h2>在庫数を編集</h2>
+        </div>
+        <button class="icon-btn" value="cancel" aria-label="閉じる">×</button>
+      </div>
+      <div id="inventoryFormRows" class="inventory-form-rows"></div>
+      <div class="dialog-actions">
+        <button class="ghost-btn" value="cancel">キャンセル</button>
+        <button class="primary-btn" value="default" id="saveInventoryBtn">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
