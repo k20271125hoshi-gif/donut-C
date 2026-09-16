@@ -1,796 +1,412 @@
-const DEFAULT_PRODUCTS = [
-  { id: 'fujiyama_plain', name: '藤山プレーン', price: 350, stock: 30 },
-  { id: 'daiki_dip', name: '大貴 dip', price: 400, stock: 30 },
-  { id: 'iidas_special', name: '飯田’s スペシャル', price: 500, stock: 30 }
-];
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+import { getDatabase, ref, onValue, runTransaction } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-database.js";
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 
-const STORAGE_KEY = 'donut-match-v5';
-const LEGACY_STORAGE_KEY = 'donut-match-v4';
-const ACTIVE_VIEW_KEY = 'donut-match-v5-active-view';
-const UNDO_MS = 5000;
-
-let state = loadState();
-let cart = {};
-let activeView = localStorage.getItem(ACTIVE_VIEW_KEY) || 'order';
-const pendingTimers = new Map();
-
-const els = {
-  productGrid: document.getElementById('productGrid'),
-  cartItems: document.getElementById('cartItems'),
-  cartEmpty: document.getElementById('cartEmpty'),
-  cartTotal: document.getElementById('cartTotal'),
-  submitOrderBtn: document.getElementById('submitOrderBtn'),
-  clearCartBtn: document.getElementById('clearCartBtn'),
-  customerNameInput: document.getElementById('customerNameInput'),
-
-  toppingQueue: document.getElementById('toppingQueue'),
-  handoffQueue: document.getElementById('handoffQueue'),
-  logList: document.getElementById('logList'),
-
-  toppingWaitingCount: document.getElementById('toppingWaitingCount'),
-  handoffWaitingCount: document.getElementById('handoffWaitingCount'),
-  completedCount: document.getElementById('completedCount'),
-  toppingPageCount: document.getElementById('toppingPageCount'),
-  handoffPageCount: document.getElementById('handoffPageCount'),
-  toppingNavCount: document.getElementById('toppingNavCount'),
-  handoffNavCount: document.getElementById('handoffNavCount'),
-
-  inventoryList: document.getElementById('inventoryList'),
-  inventoryEditBtn: document.getElementById('inventoryEditBtn'),
-  inventoryDialog: document.getElementById('inventoryDialog'),
-  inventoryFormRows: document.getElementById('inventoryFormRows'),
-  inventoryForm: document.getElementById('inventoryForm'),
-
-  toast: document.getElementById('toast')
+const firebaseConfig = {
+  apiKey: "AIzaSyBMCNuLCRTtOoXqevH9vEoW8vkExR3FVyQ",
+  authDomain: "donut-match-d07d0.firebaseapp.com",
+  databaseURL: "https://donut-match-d07d0-default-rtdb.asia-southeast1.firebasedatabase.app/",
+  projectId: "donut-match-d07d0",
+  storageBucket: "donut-match-d07d0.firebasestorage.app",
+  messagingSenderId: "425637735845",
+  appId: "1:425637735845:web:160e82e9238dde87958c4c"
 };
 
-function newBaseState() {
-  return {
-    products: structuredClone(DEFAULT_PRODUCTS),
-    orders: []
-  };
+const DEFAULT_PRODUCTS = [
+  { id: "fujiyama_plain", name: "藤山プレーン", price: 350, stock: 30 },
+  { id: "daiki_dip", name: "大貴 dip", price: 400, stock: 30 },
+  { id: "iidas_special", name: "飯田’s スペシャル", price: 500, stock: 30 }
+];
+
+const ACTIVE_VIEW_KEY = "donut-match-firebase-active-view";
+const UNDO_MS = 5000;
+
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getDatabase(firebaseApp);
+const auth = getAuth(firebaseApp);
+const rootRef = ref(db, "donutMatch");
+const connectedRef = ref(db, ".info/connected");
+
+let state = { products: structuredClone(DEFAULT_PRODUCTS), orders: [] };
+let cart = {};
+let activeView = localStorage.getItem(ACTIVE_VIEW_KEY) || "order";
+let stopData = null;
+let stopConnection = null;
+const pendingTimers = new Map();
+
+const els = Object.fromEntries([
+  "authScreen","loginForm","loginEmail","loginPassword","loginBtn","loginError",
+  "appRoot","bottomNav","logoutBtn","syncIndicator","productGrid","cartItems","cartEmpty",
+  "cartTotal","submitOrderBtn","clearCartBtn","customerNameInput","toppingQueue","handoffQueue",
+  "logList","toppingWaitingCount","handoffWaitingCount","completedCount","toppingPageCount",
+  "handoffPageCount","toppingNavCount","handoffNavCount","inventoryList","inventoryEditBtn",
+  "inventoryDialog","inventoryFormRows","inventoryForm","toast"
+].map(id => [id, document.getElementById(id)]));
+
+function makeProductMap() {
+  return Object.fromEntries(DEFAULT_PRODUCTS.map(p => [p.id, { ...p }]));
 }
 
-function normalizePendingTransition(pending) {
-  if (!pending || !['topping', 'delivery'].includes(pending.type)) return null;
-  const until = Number(pending.until);
-  if (!Number.isFinite(until)) return null;
-  return { type: pending.type, until };
+function normalizeItems(items) {
+  if (!items) return [];
+  if (Array.isArray(items)) {
+    return items.filter(Boolean).map(i => ({ productId: i.productId, qty: Number(i.qty) || 0 })).filter(i => i.productId && i.qty > 0);
+  }
+  return Object.entries(items).map(([productId, qty]) => ({ productId, qty: Number(qty) || 0 })).filter(i => i.qty > 0);
 }
 
-function normalizeOrder(order) {
-  if (!order || !order.id) return null;
-
-  let status = order.status;
-  if (status === 'preparing') status = 'topping';
-  if (status === 'ready') status = 'handoff';
-
-  return {
-    id: order.id,
-    customerName: order.customerName || '名前未設定',
-    items: Array.isArray(order.items) ? order.items : [],
-    total: Number(order.total) || 0,
-    status: ['topping', 'handoff', 'completed', 'cancelled'].includes(status) ? status : 'topping',
-    createdAt: Number(order.createdAt) || Date.now(),
-    toppingCompletedAt: order.toppingCompletedAt ? Number(order.toppingCompletedAt) : null,
-    deliveryCompletedAt: order.deliveryCompletedAt ? Number(order.deliveryCompletedAt) : null,
-    cancelledAt: order.cancelledAt ? Number(order.cancelledAt) : null,
-    pendingTransition: normalizePendingTransition(order.pendingTransition)
-  };
+function normalizePending(p) {
+  if (!p || !["topping", "delivery"].includes(p.type)) return null;
+  const until = Number(p.until);
+  return Number.isFinite(until) ? { type: p.type, until } : null;
 }
 
 function normalizeState(raw) {
-  if (!raw || !Array.isArray(raw.orders)) return newBaseState();
+  const remoteProducts = raw?.products || {};
+  const products = DEFAULT_PRODUCTS.map(base => ({
+    ...base,
+    stock: Number.isFinite(Number(remoteProducts[base.id]?.stock))
+      ? Math.max(0, Math.floor(Number(remoteProducts[base.id].stock)))
+      : base.stock
+  }));
 
-  const migratedOrders = raw.orders.map(normalizeOrder).filter(Boolean);
+  const orders = Object.entries(raw?.orders || {}).map(([id, o]) => ({
+    id,
+    customerName: String(o.customerName || "名前未設定"),
+    items: normalizeItems(o.items),
+    total: Number(o.total) || 0,
+    status: ["topping","handoff","completed","cancelled"].includes(o.status) ? o.status : "topping",
+    createdAt: Number(o.createdAt) || Date.now(),
+    toppingCompletedAt: o.toppingCompletedAt ? Number(o.toppingCompletedAt) : null,
+    deliveryCompletedAt: o.deliveryCompletedAt ? Number(o.deliveryCompletedAt) : null,
+    cancelledAt: o.cancelledAt ? Number(o.cancelledAt) : null,
+    pendingTransition: normalizePending(o.pendingTransition)
+  }));
 
-  return {
-    products: structuredClone(DEFAULT_PRODUCTS),
-    orders: migratedOrders.filter(order =>
-      order.items.every(item => DEFAULT_PRODUCTS.some(p => p.id === item.productId))
-    )
-  };
+  return { products, orders };
 }
 
-function loadState() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (saved) return normalizeState(saved);
+function getProduct(id) { return state.products.find(p => p.id === id); }
+function getOrder(id) { return state.orders.find(o => o.id === id); }
+function money(n) { return `¥${Number(n).toLocaleString("ja-JP")}`; }
+function clockTime(t) { return new Date(t).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }); }
+function dateTime(t) { return new Date(t).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+function uid() { return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`; }
+function escapeHtml(v) { return String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;"); }
 
-    const legacy = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY));
-    if (legacy) return normalizeState(legacy);
-  } catch (_) {}
-
-  return newBaseState();
+async function ensureSeeded() {
+  await runTransaction(rootRef, current => {
+    const next = current || {};
+    next.products = next.products || makeProductMap();
+    for (const [id, p] of Object.entries(makeProductMap())) {
+      if (!next.products[id]) next.products[id] = p;
+    }
+    return next;
+  }, { applyLocally: false });
 }
 
-function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-
-  try {
-    channel?.postMessage({ type: 'state-updated', at: Date.now() });
-  } catch (_) {}
-}
-
-const channel = 'BroadcastChannel' in window
-  ? new BroadcastChannel('donut-match-ops-v5')
-  : null;
-
-if (channel) {
-  channel.addEventListener('message', event => {
-    if (event.data?.type !== 'state-updated') return;
-
-    try {
-      const fresh = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      if (fresh) {
-        state = normalizeState(fresh);
-        reconcilePendingTransitions();
-        render();
-      }
-    } catch (_) {}
-  });
-}
-
-window.addEventListener('storage', event => {
-  if (event.key !== STORAGE_KEY || !event.newValue) return;
-
-  try {
-    state = normalizeState(JSON.parse(event.newValue));
-    reconcilePendingTransitions();
+function startSync() {
+  stopSync();
+  stopData = onValue(rootRef, snap => {
+    state = normalizeState(snap.val());
     render();
-  } catch (_) {}
-});
+    finalizeExpired();
+  }, err => {
+    console.error(err);
+    showToast("データ同期に失敗しました");
+  });
 
-function money(n) {
-  return `¥${Number(n).toLocaleString('ja-JP')}`;
-}
-
-function clockTime(timestamp) {
-  return new Date(timestamp).toLocaleTimeString('ja-JP', {
-    hour: '2-digit',
-    minute: '2-digit'
+  stopConnection = onValue(connectedRef, snap => {
+    const online = snap.val() === true;
+    els.syncIndicator.textContent = online ? "同期中" : "オフライン";
+    els.syncIndicator.classList.toggle("online", online);
+    els.syncIndicator.classList.toggle("offline", !online);
   });
 }
 
-function dateTime(timestamp) {
-  return new Date(timestamp).toLocaleString('ja-JP', {
-    month: 'numeric',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  });
-}
-
-function uid() {
-  return crypto.randomUUID
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random()}`;
-}
-
-function getProduct(id) {
-  return state.products.find(p => p.id === id);
-}
-
-function getOrder(id) {
-  return state.orders.find(o => o.id === id);
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
+function stopSync() {
+  if (typeof stopData === "function") stopData();
+  if (typeof stopConnection === "function") stopConnection();
+  stopData = stopConnection = null;
+  for (const [id, timer] of pendingTimers) { clearTimeout(timer); pendingTimers.delete(id); }
 }
 
 function switchView(view) {
-  if (!['order', 'topping', 'handoff', 'log'].includes(view)) view = 'order';
-
+  if (!["order","topping","handoff","log"].includes(view)) view = "order";
   activeView = view;
-  localStorage.setItem(ACTIVE_VIEW_KEY, activeView);
-
-  document.querySelectorAll('.app-view').forEach(section => {
-    const isActive = section.dataset.view === view;
-    section.hidden = !isActive;
-    section.classList.toggle('active', isActive);
+  localStorage.setItem(ACTIVE_VIEW_KEY, view);
+  document.querySelectorAll(".app-view").forEach(s => {
+    const active = s.dataset.view === view;
+    s.hidden = !active;
+    s.classList.toggle("active", active);
   });
-
-  document.querySelectorAll('[data-view-target]').forEach(btn => {
-    const isActive = btn.dataset.viewTarget === view;
-    btn.classList.toggle('active', isActive);
-
-    if (isActive) btn.setAttribute('aria-current', 'page');
-    else btn.removeAttribute('aria-current');
+  document.querySelectorAll("[data-view-target]").forEach(b => {
+    const active = b.dataset.viewTarget === view;
+    b.classList.toggle("active", active);
+    active ? b.setAttribute("aria-current","page") : b.removeAttribute("aria-current");
   });
-
-  window.scrollTo({ top: 0, behavior: 'instant' });
+  window.scrollTo({ top: 0, behavior: "instant" });
 }
 
 function render() {
-  renderProducts();
-  renderCart();
-  renderInventory();
-  renderToppingQueue();
-  renderHandoffQueue();
-  renderLog();
-  renderStats();
-  schedulePendingTimers();
+  renderProducts(); renderCart(); renderInventory(); renderTopping(); renderHandoff(); renderLog(); renderStats(); schedulePendingTimers();
 }
 
 function renderProducts() {
   els.productGrid.innerHTML = state.products.map(p => {
-    const inCart = cart[p.id] || 0;
-    const available = p.stock - inCart;
-
-    return `
-      <button class="product-card" type="button" data-product-id="${p.id}" ${available <= 0 ? 'disabled' : ''}>
-        <div class="product-name">${escapeHtml(p.name)}</div>
-        <div class="product-bottom">
-          <span class="product-price">${money(p.price)}</span>
-          <span class="stock-badge">残 ${Math.max(0, available)}</span>
-        </div>
-      </button>
-    `;
-  }).join('');
-
-  document.querySelectorAll('[data-product-id]').forEach(btn => {
-    btn.addEventListener('click', () => addToCart(btn.dataset.productId));
-  });
+    const available = p.stock - (cart[p.id] || 0);
+    return `<button class="product-card" type="button" data-product-id="${p.id}" ${available <= 0 ? "disabled" : ""}>
+      <div class="product-name">${escapeHtml(p.name)}</div>
+      <div class="product-bottom"><span class="product-price">${money(p.price)}</span><span class="stock-badge">残 ${Math.max(0, available)}</span></div>
+    </button>`;
+  }).join("");
+  document.querySelectorAll("[data-product-id]").forEach(b => b.addEventListener("click", () => addToCart(b.dataset.productId)));
 }
 
 function addToCart(id) {
-  const p = getProduct(id);
-  if (!p) return;
-
+  const p = getProduct(id); if (!p) return;
   const current = cart[id] || 0;
-
-  if (current >= p.stock) {
-    showToast(`${p.name}は在庫上限です`);
-    return;
-  }
-
-  cart[id] = current + 1;
-  renderProducts();
-  renderCart();
+  if (current >= p.stock) return showToast(`${p.name}は在庫上限です`);
+  cart[id] = current + 1; renderProducts(); renderCart();
 }
 
 function changeQty(id, delta) {
-  const p = getProduct(id);
-  if (!p) return;
-
+  const p = getProduct(id); if (!p) return;
   const next = (cart[id] || 0) + delta;
-
-  if (next <= 0) {
-    delete cart[id];
-  } else if (next <= p.stock) {
-    cart[id] = next;
-  }
-
-  renderProducts();
-  renderCart();
+  if (next <= 0) delete cart[id]; else if (next <= p.stock) cart[id] = next;
+  renderProducts(); renderCart();
 }
 
 function renderCart() {
-  const entries = Object.entries(cart).filter(([, qty]) => qty > 0);
-
+  const entries = Object.entries(cart).filter(([,q]) => q > 0);
   els.cartEmpty.hidden = entries.length > 0;
-
   els.cartItems.innerHTML = entries.map(([id, qty]) => {
-    const p = getProduct(id);
-    if (!p) return '';
-
-    return `
-      <div class="cart-row">
-        <div>
-          <strong>${escapeHtml(p.name)}</strong>
-          <div style="font-size:12px;color:#737373">${money(p.price)} × ${qty}</div>
-        </div>
-
-        <div class="qty-control">
-          <button class="qty-btn" type="button" data-id="${id}" data-delta="-1">−</button>
-          <strong>${qty}</strong>
-          <button class="qty-btn" type="button" data-id="${id}" data-delta="1">＋</button>
-        </div>
-
-        <strong>${money(p.price * qty)}</strong>
-      </div>
-    `;
-  }).join('');
-
-  document.querySelectorAll('.qty-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      changeQty(btn.dataset.id, Number(btn.dataset.delta));
-    });
-  });
-
-  const total = entries.reduce((sum, [id, qty]) => {
-    const p = getProduct(id);
-    return sum + (p ? p.price * qty : 0);
-  }, 0);
-
-  els.cartTotal.textContent = money(total);
+    const p = getProduct(id); if (!p) return "";
+    return `<div class="cart-row"><div><strong>${escapeHtml(p.name)}</strong><div style="font-size:12px;color:#737373">${money(p.price)} × ${qty}</div></div>
+      <div class="qty-control"><button class="qty-btn" type="button" data-id="${id}" data-delta="-1">−</button><strong>${qty}</strong><button class="qty-btn" type="button" data-id="${id}" data-delta="1">＋</button></div>
+      <strong>${money(p.price * qty)}</strong></div>`;
+  }).join("");
+  document.querySelectorAll(".qty-btn").forEach(b => b.addEventListener("click", () => changeQty(b.dataset.id, Number(b.dataset.delta))));
+  els.cartTotal.textContent = money(entries.reduce((sum,[id,q]) => sum + (getProduct(id)?.price || 0) * q, 0));
   updateSubmitState();
 }
 
 function updateSubmitState() {
-  const hasItems = Object.values(cart).some(qty => qty > 0);
-  const hasName = els.customerNameInput.value.trim().length > 0;
-
-  els.submitOrderBtn.disabled = !(hasItems && hasName);
+  els.submitOrderBtn.disabled = !(Object.values(cart).some(q => q > 0) && els.customerNameInput.value.trim());
 }
 
-function submitOrder() {
-  const customerName = els.customerNameInput.value.trim();
-  const entries = Object.entries(cart).filter(([, qty]) => qty > 0);
+async function submitOrder() {
+  const name = els.customerNameInput.value.trim();
+  const entries = Object.entries(cart).filter(([,q]) => q > 0);
+  if (!name) { els.customerNameInput.focus(); return showToast("名前を入力してください"); }
+  if (!entries.length) return showToast("商品を選んでください");
 
-  if (!customerName) {
-    showToast('名前を入力してください');
-    els.customerNameInput.focus();
-    return;
-  }
+  const orderId = uid();
+  let abortReason = "";
+  els.submitOrderBtn.disabled = true;
 
-  if (!entries.length) {
-    showToast('商品を選んでください');
-    return;
-  }
+  try {
+    const result = await runTransaction(rootRef, current => {
+      if (!current?.products) { abortReason = "商品データを読み込めません"; return; }
+      for (const [id, qty] of entries) {
+        const p = current.products[id];
+        if (!p) { abortReason = "商品データが見つかりません"; return; }
+        if ((Number(p.stock) || 0) < qty) { abortReason = `${p.name}の在庫が足りません`; return; }
+      }
+      let total = 0; const items = {};
+      for (const [id, qty] of entries) {
+        const p = current.products[id]; p.stock = (Number(p.stock) || 0) - qty; total += Number(p.price) * qty; items[id] = qty;
+      }
+      current.orders = current.orders || {};
+      current.orders[orderId] = { customerName: name, items, total, status: "topping", createdAt: Date.now() };
+      return current;
+    }, { applyLocally: false });
 
-  for (const [id, qty] of entries) {
-    const p = getProduct(id);
-
-    if (!p || p.stock < qty) {
-      showToast(`${p?.name ?? '商品'}の在庫が足りません`);
-      return;
-    }
-  }
-
-  const total = entries.reduce((sum, [id, qty]) => {
-    const p = getProduct(id);
-    return sum + p.price * qty;
-  }, 0);
-
-  const order = {
-    id: uid(),
-    customerName,
-    items: entries.map(([id, qty]) => ({ productId: id, qty })),
-    total,
-    status: 'topping',
-    createdAt: Date.now(),
-    toppingCompletedAt: null,
-    deliveryCompletedAt: null,
-    cancelledAt: null,
-    pendingTransition: null
-  };
-
-  entries.forEach(([id, qty]) => {
-    getProduct(id).stock -= qty;
-  });
-
-  state.orders.push(order);
-
-  cart = {};
-  els.customerNameInput.value = '';
-
-  saveState();
-  render();
-  showToast(`${customerName}さんの注文を登録しました`);
+    if (!result.committed) return showToast(abortReason || "注文を登録できませんでした");
+    cart = {}; els.customerNameInput.value = ""; renderCart(); renderProducts(); showToast(`${name}さんの注文を登録しました`);
+  } catch (e) {
+    console.error(e); showToast("注文登録に失敗しました");
+  } finally { updateSubmitState(); }
 }
 
 function renderOrderItems(order) {
-  return order.items.map(item => {
-    const p = getProduct(item.productId);
-    const name = p?.name ?? item.productId;
-
-    return `
-      <div class="task-item-line">
-        <strong>${escapeHtml(name)}</strong>
-        <span>× ${item.qty}</span>
-      </div>
-    `;
-  }).join('');
+  return order.items.map(i => `<div class="task-item-line"><strong>${escapeHtml(getProduct(i.productId)?.name || i.productId)}</strong><span>× ${i.qty}</span></div>`).join("");
 }
 
-function renderToppingQueue() {
-  const orders = state.orders
-    .filter(o => o.status === 'topping')
-    .sort((a, b) => a.createdAt - b.createdAt);
-
-  els.toppingQueue.innerHTML = orders.length
-    ? orders.map(order => renderTaskCard(order, 'topping')).join('')
-    : `<div class="task-empty">トッピング待ちはありません</div>`;
-
+function renderTopping() {
+  const orders = state.orders.filter(o => o.status === "topping").sort((a,b) => a.createdAt - b.createdAt);
+  els.toppingQueue.innerHTML = orders.length ? orders.map(o => renderTaskCard(o,"topping")).join("") : `<div class="task-empty">トッピング待ちはありません</div>`;
   bindTaskButtons();
 }
 
-function renderHandoffQueue() {
-  const orders = state.orders
-    .filter(o => o.status === 'handoff')
-    .sort((a, b) =>
-      (a.toppingCompletedAt || a.createdAt) -
-      (b.toppingCompletedAt || b.createdAt)
-    );
-
-  els.handoffQueue.innerHTML = orders.length
-    ? orders.map(order => renderTaskCard(order, 'handoff')).join('')
-    : `<div class="task-empty">商品渡し待ちはありません</div>`;
-
+function renderHandoff() {
+  const orders = state.orders.filter(o => o.status === "handoff").sort((a,b) => (a.toppingCompletedAt || a.createdAt) - (b.toppingCompletedAt || b.createdAt));
+  els.handoffQueue.innerHTML = orders.length ? orders.map(o => renderTaskCard(o,"handoff")).join("") : `<div class="task-empty">商品渡し待ちはありません</div>`;
   bindTaskButtons();
 }
 
 function renderTaskCard(order, stage) {
-  const pendingType = stage === 'topping' ? 'topping' : 'delivery';
-  const isPending = order.pendingTransition?.type === pendingType;
+  const type = stage === "topping" ? "topping" : "delivery";
+  const pending = order.pendingTransition?.type === type;
+  const seconds = pending ? Math.max(1, Math.ceil((order.pendingTransition.until - Date.now()) / 1000)) : 0;
+  const label = pending ? "完了処理中" : stage === "topping" ? "トッピング待ち" : "商品渡し待ち";
+  const main = stage === "topping"
+    ? `<button class="task-main-btn" type="button" data-order-action="start-topping" data-order-id="${order.id}">トッピング完了</button>`
+    : `<button class="task-main-btn green" type="button" data-order-action="start-delivery" data-order-id="${order.id}">商品渡し完了</button>`;
+  const actions = pending
+    ? `<button class="undo-btn" type="button" data-order-action="undo" data-order-id="${order.id}">完了を取り消す</button>`
+    : `${main}${stage === "topping" ? `<button class="cancel-order-btn" type="button" data-order-action="cancel" data-order-id="${order.id}">×</button>` : ""}`;
 
-  const secondsLeft = isPending
-    ? Math.max(1, Math.ceil((order.pendingTransition.until - Date.now()) / 1000))
-    : 0;
-
-  const statusLabel = isPending
-    ? '完了処理中'
-    : stage === 'topping'
-      ? 'トッピング待ち'
-      : '商品渡し待ち';
-
-  const mainButton = stage === 'topping'
-    ? `<button class="task-main-btn" type="button" data-order-action="start-topping-complete" data-order-id="${order.id}">トッピング完了</button>`
-    : `<button class="task-main-btn green" type="button" data-order-action="start-delivery-complete" data-order-id="${order.id}">商品渡し完了</button>`;
-
-  const actions = isPending
-    ? `
-      <button class="undo-btn" type="button" data-order-action="undo" data-order-id="${order.id}">
-        完了を取り消す
-      </button>
-    `
-    : `
-      ${mainButton}
-      ${stage === 'topping'
-        ? `<button class="cancel-order-btn" type="button" title="注文取消" data-order-action="cancel" data-order-id="${order.id}">×</button>`
-        : ''
-      }
-    `;
-
-  return `
-    <article class="task-card ${isPending ? 'pending' : ''}">
-      <div class="task-card-head">
-        <div>
-          <div class="customer-name">${escapeHtml(order.customerName)}さん</div>
-          <div class="order-time">受付 ${clockTime(order.createdAt)}</div>
-        </div>
-
-        <span class="status-chip ${stage === 'handoff' ? 'handoff' : ''} ${isPending ? 'pending' : ''}">
-          ${statusLabel}
-        </span>
-      </div>
-
-      <div class="task-items">
-        ${renderOrderItems(order)}
-      </div>
-
-      <div class="task-meta">
-        <span>合計 ${money(order.total)}</span>
-        <span>${stage === 'handoff' && order.toppingCompletedAt ? `トッピング完了 ${clockTime(order.toppingCompletedAt)}` : ''}</span>
-      </div>
-
-      <div class="task-actions">
-        ${actions}
-      </div>
-
-      ${isPending ? `<div class="pending-note">あと約${secondsLeft}秒で次へ移動</div>` : ''}
-    </article>
-  `;
+  return `<article class="task-card ${pending ? "pending" : ""}"><div class="task-card-head"><div><div class="customer-name">${escapeHtml(order.customerName)}さん</div><div class="order-time">受付 ${clockTime(order.createdAt)}</div></div>
+    <span class="status-chip ${stage === "handoff" ? "handoff" : ""} ${pending ? "pending" : ""}">${label}</span></div>
+    <div class="task-items">${renderOrderItems(order)}</div>
+    <div class="task-meta"><span>合計 ${money(order.total)}</span><span>${stage === "handoff" && order.toppingCompletedAt ? `トッピング完了 ${clockTime(order.toppingCompletedAt)}` : ""}</span></div>
+    <div class="task-actions">${actions}</div>${pending ? `<div class="pending-note">あと約${seconds}秒で次へ移動</div>` : ""}</article>`;
 }
 
 function bindTaskButtons() {
-  document.querySelectorAll('[data-order-action]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.orderId;
-      const action = btn.dataset.orderAction;
-
-      if (action === 'start-topping-complete') startPendingTransition(id, 'topping');
-      if (action === 'start-delivery-complete') startPendingTransition(id, 'delivery');
-      if (action === 'undo') undoPendingTransition(id);
-      if (action === 'cancel') cancelOrder(id);
-    });
-  });
+  document.querySelectorAll("[data-order-action]").forEach(b => b.addEventListener("click", () => {
+    const id = b.dataset.orderId, action = b.dataset.orderAction;
+    if (action === "start-topping") startPending(id,"topping");
+    if (action === "start-delivery") startPending(id,"delivery");
+    if (action === "undo") undoPending(id);
+    if (action === "cancel") cancelOrder(id);
+  }));
 }
 
-function startPendingTransition(orderId, type) {
-  const order = getOrder(orderId);
-  if (!order || order.pendingTransition) return;
-
-  if (type === 'topping' && order.status !== 'topping') return;
-  if (type === 'delivery' && order.status !== 'handoff') return;
-
-  order.pendingTransition = {
-    type,
-    until: Date.now() + UNDO_MS
-  };
-
-  saveState();
-  render();
-
-  showToast('5秒以内なら取り消せます');
+async function startPending(orderId, type) {
+  const orderRef = ref(db, `donutMatch/orders/${orderId}`);
+  const result = await runTransaction(orderRef, order => {
+    if (!order || order.pendingTransition) return;
+    if (type === "topping" && order.status !== "topping") return;
+    if (type === "delivery" && order.status !== "handoff") return;
+    order.pendingTransition = { type, until: Date.now() + UNDO_MS };
+    return order;
+  }, { applyLocally: false });
+  if (result.committed) showToast("5秒以内なら取り消せます");
 }
 
-function undoPendingTransition(orderId) {
-  const order = getOrder(orderId);
-  if (!order?.pendingTransition) return;
-
-  order.pendingTransition = null;
-  clearPendingTimer(orderId);
-
-  saveState();
-  render();
-  showToast('完了を取り消しました');
+async function undoPending(orderId) {
+  const orderRef = ref(db, `donutMatch/orders/${orderId}`);
+  const result = await runTransaction(orderRef, order => {
+    if (!order?.pendingTransition || Number(order.pendingTransition.until) <= Date.now()) return;
+    order.pendingTransition = null; return order;
+  }, { applyLocally: false });
+  if (result.committed) { clearPendingTimer(orderId); showToast("完了を取り消しました"); }
+  else showToast("5秒の取消時間を過ぎています");
 }
 
-function finalizePendingTransition(orderId) {
-  const order = getOrder(orderId);
-  if (!order?.pendingTransition) return;
-
-  const type = order.pendingTransition.type;
-
-  if (type === 'topping' && order.status === 'topping') {
-    order.status = 'handoff';
-    order.toppingCompletedAt = Date.now();
-  }
-
-  if (type === 'delivery' && order.status === 'handoff') {
-    order.status = 'completed';
-    order.deliveryCompletedAt = Date.now();
-  }
-
-  order.pendingTransition = null;
-  clearPendingTimer(orderId);
-
-  saveState();
-  render();
+async function finalizePending(orderId) {
+  const orderRef = ref(db, `donutMatch/orders/${orderId}`), now = Date.now();
+  try {
+    await runTransaction(orderRef, order => {
+      const p = order?.pendingTransition;
+      if (!p || Number(p.until) > now) return;
+      if (p.type === "topping" && order.status === "topping") { order.status = "handoff"; order.toppingCompletedAt = now; order.pendingTransition = null; return order; }
+      if (p.type === "delivery" && order.status === "handoff") { order.status = "completed"; order.deliveryCompletedAt = now; order.pendingTransition = null; return order; }
+      return;
+    }, { applyLocally: false });
+  } finally { clearPendingTimer(orderId); }
 }
 
-function cancelOrder(orderId) {
-  const order = getOrder(orderId);
-  if (!order || order.status !== 'topping' || order.pendingTransition) return;
-
-  const ok = confirm(`${order.customerName}さんの注文を取り消しますか？\n在庫は戻ります。`);
-  if (!ok) return;
-
-  order.items.forEach(item => {
-    const p = getProduct(item.productId);
-    if (p) p.stock += item.qty;
-  });
-
-  order.status = 'cancelled';
-  order.cancelledAt = Date.now();
-
-  saveState();
-  render();
-  showToast('注文を取り消しました');
-}
-
-function reconcilePendingTransitions() {
-  const now = Date.now();
-  let changed = false;
-
-  state.orders.forEach(order => {
-    const pending = order.pendingTransition;
-    if (!pending) return;
-
-    if (pending.until <= now) {
-      if (pending.type === 'topping' && order.status === 'topping') {
-        order.status = 'handoff';
-        order.toppingCompletedAt = now;
-      }
-
-      if (pending.type === 'delivery' && order.status === 'handoff') {
-        order.status = 'completed';
-        order.deliveryCompletedAt = now;
-      }
-
-      order.pendingTransition = null;
-      changed = true;
+async function cancelOrder(orderId) {
+  const local = getOrder(orderId); if (!local) return;
+  if (!confirm(`${local.customerName}さんの注文を取り消しますか？\n在庫は戻ります。`)) return;
+  let reason = "";
+  const result = await runTransaction(rootRef, current => {
+    const order = current?.orders?.[orderId];
+    if (!order) { reason = "注文が見つかりません"; return; }
+    if (order.status !== "topping" || order.pendingTransition) { reason = "この注文は取り消せません"; return; }
+    for (const item of normalizeItems(order.items)) {
+      if (current.products?.[item.productId]) current.products[item.productId].stock = (Number(current.products[item.productId].stock) || 0) + item.qty;
     }
-  });
-
-  if (changed) saveState();
+    order.status = "cancelled"; order.cancelledAt = Date.now(); return current;
+  }, { applyLocally: false });
+  showToast(result.committed ? "注文を取り消しました" : (reason || "注文を取り消せませんでした"));
 }
 
 function schedulePendingTimers() {
-  const activeIds = new Set();
-
-  state.orders.forEach(order => {
-    const pending = order.pendingTransition;
-    if (!pending) return;
-
-    activeIds.add(order.id);
-
-    if (pendingTimers.has(order.id)) return;
-
-    const delay = Math.max(0, pending.until - Date.now());
-
-    const timer = setTimeout(() => {
-      pendingTimers.delete(order.id);
-      finalizePendingTransition(order.id);
-    }, delay);
-
+  const active = new Set();
+  for (const order of state.orders) {
+    if (!order.pendingTransition) continue;
+    active.add(order.id);
+    if (pendingTimers.has(order.id)) continue;
+    const timer = setTimeout(() => { pendingTimers.delete(order.id); finalizePending(order.id); }, Math.max(0, order.pendingTransition.until - Date.now()));
     pendingTimers.set(order.id, timer);
-  });
-
-  for (const [orderId, timer] of pendingTimers.entries()) {
-    if (!activeIds.has(orderId)) {
-      clearTimeout(timer);
-      pendingTimers.delete(orderId);
-    }
   }
+  for (const [id,timer] of pendingTimers) if (!active.has(id)) { clearTimeout(timer); pendingTimers.delete(id); }
 }
 
-function clearPendingTimer(orderId) {
-  const timer = pendingTimers.get(orderId);
-
-  if (timer) {
-    clearTimeout(timer);
-  }
-
-  pendingTimers.delete(orderId);
-}
+function clearPendingTimer(id) { const t = pendingTimers.get(id); if (t) clearTimeout(t); pendingTimers.delete(id); }
+function finalizeExpired() { for (const o of state.orders) if (o.pendingTransition && o.pendingTransition.until <= Date.now()) finalizePending(o.id); }
 
 function renderLog() {
-  const finished = state.orders
-    .filter(o => o.status === 'completed' || o.status === 'cancelled')
-    .sort((a, b) => {
-      const aTime = a.deliveryCompletedAt || a.cancelledAt || a.createdAt;
-      const bTime = b.deliveryCompletedAt || b.cancelledAt || b.createdAt;
-      return bTime - aTime;
-    });
-
-  if (!finished.length) {
-    els.logList.innerHTML = `<div class="task-empty">Logはありません</div>`;
-    return;
-  }
-
-  els.logList.innerHTML = finished.map(order => {
-    const cancelled = order.status === 'cancelled';
-    const finishedAt = cancelled ? order.cancelledAt : order.deliveryCompletedAt;
-
-    return `
-      <article class="log-card">
-        <div class="log-card-head">
-          <div>
-            <div class="log-name">${escapeHtml(order.customerName)}さん</div>
-            <div class="order-time">受付 ${dateTime(order.createdAt)}</div>
-          </div>
-
-          <span class="log-status ${cancelled ? 'cancelled' : ''}">
-            ${cancelled ? '注文取消' : '商品渡し完了'}
-          </span>
-        </div>
-
-        <div class="log-items">
-          ${order.items.map(item => {
-            const p = getProduct(item.productId);
-            return `${escapeHtml(p?.name ?? item.productId)} × ${item.qty}`;
-          }).join(' / ')}
-        </div>
-
-        <div class="log-meta">
-          ${cancelled ? '取消' : '完了'} ${finishedAt ? dateTime(finishedAt) : '-'} ・ 合計 ${money(order.total)}
-        </div>
-      </article>
-    `;
-  }).join('');
+  const finished = state.orders.filter(o => ["completed","cancelled"].includes(o.status)).sort((a,b) => (b.deliveryCompletedAt || b.cancelledAt || b.createdAt) - (a.deliveryCompletedAt || a.cancelledAt || a.createdAt));
+  if (!finished.length) { els.logList.innerHTML = `<div class="task-empty">Logはありません</div>`; return; }
+  els.logList.innerHTML = finished.map(o => {
+    const cancelled = o.status === "cancelled", when = cancelled ? o.cancelledAt : o.deliveryCompletedAt;
+    return `<article class="log-card"><div class="log-card-head"><div><div class="log-name">${escapeHtml(o.customerName)}さん</div><div class="order-time">受付 ${dateTime(o.createdAt)}</div></div><span class="log-status ${cancelled ? "cancelled" : ""}">${cancelled ? "注文取消" : "商品渡し完了"}</span></div>
+      <div class="log-items">${o.items.map(i => `${escapeHtml(getProduct(i.productId)?.name || i.productId)} × ${i.qty}`).join(" / ")}</div><div class="log-meta">${cancelled ? "取消" : "完了"} ${when ? dateTime(when) : "-"} ・ 合計 ${money(o.total)}</div></article>`;
+  }).join("");
 }
 
 function renderInventory() {
-  els.inventoryList.innerHTML = state.products.map(p => {
-    const cls = p.stock === 0 ? 'out' : p.stock <= 5 ? 'low' : '';
-
-    return `
-      <div class="inventory-row">
-        <div>
-          <strong>${escapeHtml(p.name)}</strong><br>
-          <span>${money(p.price)}</span>
-        </div>
-        <div class="stock-number ${cls}">${p.stock}</div>
-      </div>
-    `;
-  }).join('');
+  els.inventoryList.innerHTML = state.products.map(p => `<div class="inventory-row"><div><strong>${escapeHtml(p.name)}</strong><br><span>${money(p.price)}</span></div><div class="stock-number ${p.stock === 0 ? "out" : p.stock <= 5 ? "low" : ""}">${p.stock}</div></div>`).join("");
 }
 
-function openInventoryDialog() {
-  els.inventoryFormRows.innerHTML = state.products.map(p => `
-    <label class="inventory-form-row">
-      <span><strong>${escapeHtml(p.name)}</strong></span>
-      <input type="number" min="0" step="1" name="${p.id}" value="${p.stock}" />
-    </label>
-  `).join('');
-
+function openInventory() {
+  els.inventoryFormRows.innerHTML = state.products.map(p => `<label class="inventory-form-row"><span><strong>${escapeHtml(p.name)}</strong></span><input type="number" min="0" step="1" name="${p.id}" value="${p.stock}" /></label>`).join("");
   els.inventoryDialog.showModal();
 }
 
-function saveInventory(event) {
-  event.preventDefault();
-
-  const formData = new FormData(els.inventoryForm);
-
-  state.products.forEach(p => {
-    const value = Number(formData.get(p.id));
-
-    if (Number.isFinite(value) && value >= 0) {
-      p.stock = Math.floor(value);
-    }
-  });
-
-  saveState();
-  els.inventoryDialog.close();
-  render();
-  showToast('在庫数を更新しました');
+async function saveInventory(e) {
+  e.preventDefault(); const fd = new FormData(els.inventoryForm), updates = {};
+  for (const p of state.products) { const v = Number(fd.get(p.id)); if (Number.isFinite(v) && v >= 0) updates[p.id] = Math.floor(v); }
+  const result = await runTransaction(rootRef, current => {
+    if (!current?.products) return;
+    for (const [id,stock] of Object.entries(updates)) if (current.products[id]) current.products[id].stock = stock;
+    return current;
+  }, { applyLocally: false });
+  if (result.committed) { els.inventoryDialog.close(); showToast("在庫数を更新しました"); } else showToast("在庫を更新できませんでした");
 }
 
 function renderStats() {
-  const toppingCount = state.orders.filter(o => o.status === 'topping').length;
-  const handoffCount = state.orders.filter(o => o.status === 'handoff').length;
-  const completedCount = state.orders.filter(o => o.status === 'completed').length;
-
-  els.toppingWaitingCount.textContent = toppingCount;
-  els.handoffWaitingCount.textContent = handoffCount;
-  els.completedCount.textContent = completedCount;
-
-  els.toppingPageCount.textContent = toppingCount;
-  els.handoffPageCount.textContent = handoffCount;
-
-  els.toppingNavCount.textContent = toppingCount > 9 ? '9+' : String(toppingCount);
-  els.handoffNavCount.textContent = handoffCount > 9 ? '9+' : String(handoffCount);
-
-  els.toppingNavCount.hidden = toppingCount === 0;
-  els.handoffNavCount.hidden = handoffCount === 0;
+  const topping = state.orders.filter(o => o.status === "topping").length;
+  const handoff = state.orders.filter(o => o.status === "handoff").length;
+  const completed = state.orders.filter(o => o.status === "completed").length;
+  els.toppingWaitingCount.textContent = topping; els.handoffWaitingCount.textContent = handoff; els.completedCount.textContent = completed;
+  els.toppingPageCount.textContent = topping; els.handoffPageCount.textContent = handoff;
+  els.toppingNavCount.textContent = topping > 9 ? "9+" : topping; els.handoffNavCount.textContent = handoff > 9 ? "9+" : handoff;
+  els.toppingNavCount.hidden = topping === 0; els.handoffNavCount.hidden = handoff === 0;
 }
+
+function showApp() { els.authScreen.hidden = true; els.appRoot.hidden = false; els.bottomNav.hidden = false; switchView(activeView); }
+function showLogin() { els.authScreen.hidden = false; els.appRoot.hidden = true; els.bottomNav.hidden = true; }
+function authMessage(e) { if (e?.code === "auth/invalid-credential") return "メールアドレスまたはパスワードが違います"; if (e?.code === "auth/invalid-email") return "メールアドレスを確認してください"; return "ログインできませんでした"; }
 
 let toastTimer;
+function showToast(message) { clearTimeout(toastTimer); els.toast.textContent = message; els.toast.classList.add("show"); toastTimer = setTimeout(() => els.toast.classList.remove("show"), 1800); }
 
-function showToast(message) {
-  clearTimeout(toastTimer);
-
-  els.toast.textContent = message;
-  els.toast.classList.add('show');
-
-  toastTimer = setTimeout(() => {
-    els.toast.classList.remove('show');
-  }, 1800);
-}
-
-els.submitOrderBtn.addEventListener('click', submitOrder);
-
-els.clearCartBtn.addEventListener('click', () => {
-  cart = {};
-  renderProducts();
-  renderCart();
+els.loginForm.addEventListener("submit", async e => {
+  e.preventDefault(); els.loginError.hidden = true; els.loginBtn.disabled = true; els.loginBtn.textContent = "ログイン中";
+  try { await signInWithEmailAndPassword(auth, els.loginEmail.value.trim(), els.loginPassword.value); }
+  catch (err) { console.error(err); els.loginError.textContent = authMessage(err); els.loginError.hidden = false; }
+  finally { els.loginBtn.disabled = false; els.loginBtn.textContent = "ログイン"; }
 });
 
-els.customerNameInput.addEventListener('input', updateSubmitState);
+els.logoutBtn.addEventListener("click", () => signOut(auth));
+els.submitOrderBtn.addEventListener("click", submitOrder);
+els.clearCartBtn.addEventListener("click", () => { cart = {}; renderProducts(); renderCart(); });
+els.customerNameInput.addEventListener("input", updateSubmitState);
+els.customerNameInput.addEventListener("keydown", e => { if (e.key === "Enter" && !els.submitOrderBtn.disabled) { e.preventDefault(); submitOrder(); } });
+els.inventoryEditBtn.addEventListener("click", openInventory);
+els.inventoryForm.addEventListener("submit", saveInventory);
+document.querySelectorAll("[data-view-target]").forEach(b => b.addEventListener("click", () => switchView(b.dataset.viewTarget)));
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") finalizeExpired(); });
+setInterval(() => { if (state.orders.some(o => o.pendingTransition)) { renderTopping(); renderHandoff(); finalizeExpired(); } }, 1000);
 
-els.customerNameInput.addEventListener('keydown', event => {
-  if (event.key === 'Enter' && !els.submitOrderBtn.disabled) {
-    event.preventDefault();
-    submitOrder();
-  }
+onAuthStateChanged(auth, async user => {
+  if (!user) { stopSync(); showLogin(); return; }
+  try { await ensureSeeded(); startSync(); showApp(); }
+  catch (err) { console.error(err); showLogin(); els.loginError.textContent = "Firebaseへの接続に失敗しました"; els.loginError.hidden = false; }
 });
-
-els.inventoryEditBtn.addEventListener('click', openInventoryDialog);
-els.inventoryForm.addEventListener('submit', saveInventory);
-
-document.querySelectorAll('[data-view-target]').forEach(btn => {
-  btn.addEventListener('click', () => switchView(btn.dataset.viewTarget));
-});
-
-reconcilePendingTransitions();
-render();
-switchView(activeView);
-
-setInterval(() => {
-  const hasPending = state.orders.some(o => o.pendingTransition);
-
-  if (hasPending) {
-    renderToppingQueue();
-    renderHandoffQueue();
-  }
-}, 1000);

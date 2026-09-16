@@ -8,12 +8,24 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div class="app-shell">
+  <section id="authScreen" class="auth-screen">
+    <form id="loginForm" class="login-card">
+      <div><h1>DONUT MATCH</h1><p>スタッフログイン</p></div>
+      <label><span>メールアドレス</span><input id="loginEmail" type="email" autocomplete="username" required /></label>
+      <label><span>パスワード</span><input id="loginPassword" type="password" autocomplete="current-password" required /></label>
+      <button id="loginBtn" class="primary-btn login-btn" type="submit">ログイン</button>
+      <p id="loginError" class="login-error" hidden></p>
+    </form>
+  </section>
+
+  <div id="appRoot" class="app-shell" hidden>
     <header class="topbar">
       <div class="brand-block">
         <h1>DONUT MATCH</h1>
+        <div id="syncIndicator" class="sync-indicator">接続確認中</div>
       </div>
 
+      <div class="topbar-right">
       <div class="top-stats" aria-label="本日の状況">
         <div class="stat-pill">
           <span>トッピング待ち</span>
@@ -27,6 +39,8 @@
           <span>渡し完了</span>
           <strong id="completedCount">0</strong>
         </div>
+      </div>
+      <button id="logoutBtn" class="logout-btn" type="button">ログアウト</button>
       </div>
     </header>
 
@@ -112,7 +126,7 @@
     </main>
   </div>
 
-  <nav class="bottom-nav" aria-label="メインナビゲーション">
+  <nav id="bottomNav" class="bottom-nav" aria-label="メインナビゲーション" hidden>
     <button class="bottom-nav-item active" data-view-target="order" aria-current="page" type="button">
       <span>注文受付</span>
     </button>
@@ -149,6 +163,6 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

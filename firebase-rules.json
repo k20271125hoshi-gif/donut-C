@@ -1,0 +1,8 @@
+{
+  "rules": {
+    "donutMatch": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    }
+  }
+}
